@@ -10,7 +10,15 @@
     *   硬盘通电时间
 *   ​**系统监控**​
     *   系统运行状态
-    *   CPU温度监控
+    *   CPU温度监控（支持 sensors 命令和 sysfs 回退）
+    *   CPU使用率（%）
+    *   内存使用率（%）
+    *   总内存 / 已用内存 / 可用内存
+*   ​**网络监控**​
+    *   {接口名} 下载速度
+    *   {接口名} 上传速度
+    *   {接口名} 近7日总下载
+    *   {接口名} 近7日总上传
 *   ​**设备控制**​
     *   设备重启按钮
     *   设备关机按钮
@@ -33,7 +41,7 @@
 1.  进入**HACS商店**​
 2.  添加自定义存储库：
 ```shell
-https://github.com/xiaochao99/fn_nas
+https://github.com/ybm911/fn_nas
 ```
 3.  搜索"飞牛NAS"，点击下载
 4.  ​**重启Home Assistant服务**
@@ -54,12 +62,15 @@ https://github.com/xiaochao99/fn_nas
 *   首次配置后请等待5分钟完成初始数据采集
 *   频繁扫描可能导致NAS负载升高
 *   网络唤醒功能需在BIOS中启用Wake-on-LAN
+*   CPU使用率在第二个更新周期开始显示（第一次需要建立基线）
+*   网络速度同理，第一个周期显示 0
+*   7日流量从集成首次检测到网络接口开始累计，若 NAS 重启则会重置
 
 ### 🔄 问题排查
 
-# 测试SSH连接
+测试SSH连接
 ```shell
-ssh root@<NAS_IP> -p <端口>
+ssh <用户名>@<NAS_IP> -p <端口>
 ```
 若连接失败，请检查：
 
@@ -69,7 +80,61 @@ ssh root@<NAS_IP> -p <端口>
 
 * * *
 
+## 🛠️ 最近改动
+
+### 问题修复
+
+**1. 温度传感器"未知"问题**
+
+_原因：_ sensors 命令在非 root 用户下可能因权限问题或系统未安装 lm-sensors 而无法读取硬件温度。
+
+_修复：_ 在 system_manager.py 中添加了 `_get_temperatures_from_sysfs()` 方法作为回退方案，直接从 Linux 内核的 sysfs 接口读取温度：
+
+- `/sys/class/thermal/thermal_zone*/temp` — 读取 thermal zone 温度
+- `/sys/class/hwmon/hwmon*/temp*_input` — 读取硬件监控芯片温度（带标签判断，可区分 CPU 和主板）
+
+这些 sysfs 文件通常是 world-readable 的，不需要 root 权限。当 `sensors` 命令失败时自动回退。
+
+### 新增功能
+
+**2. CPU使用率**
+
+- 新增 **CPU使用率** 传感器（%）
+- 读取 `/proc/stat` 计算 CPU 忙闲比，平滑显示
+
+**3. 内存使用率**
+
+- 新增 **内存使用率** 传感器（%）
+- 使用已有的 memory_total 和 memory_used 数据计算
+- 同时显示总内存、已用、可用内存作为属性
+
+**4. 网络监控**
+
+- 新增 **{接口名} 下载速度** 和 **{接口名} 上传速度** 传感器
+- 通过 `/proc/net/dev` 两次采样差值计算实时网速
+- 新增 **{接口名} 近7日总下载** 和 **{接口名} 近7日总上传** 传感器
+- 使用 Home Assistant 的 Store API 持久化网络流量基线数据，重启不丢失
+- 自动检测第一个非 lo 网络接口
+
+### 修改的文件
+
+| 文件 | 改动 |
+|------|------|
+| system_manager.py | 添加 sysfs 温度回退、get_cpu_usage()、get_network_stats()、compute_cpu_percent() |
+| coordinator.py | CPU/网络数据缓存、网速增量计算、7日流量 Store 持久化 |
+| sensor.py | 新增 CpuUsageSensor、MemoryUsageSensor、NetworkSpeedSensor、NetworkTraffic7dSensor |
+
+### 使用说明
+
+- 改动生效需要重启 Home Assistant 或重新加载集成
+- CPU 使用率在第二个更新周期开始显示（第一次需要建立基线）
+- 网络速度同理，第一个周期显示 0
+- 7日流量从集成首次检测到网络接口开始累计，若 NAS 重启则会重置
+
+* * *
+
 > 📌 建议使用固定IP分配给NAS设备以确保连接稳定
+
 # 免责声明
 
 1. **非官方性质**  

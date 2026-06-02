@@ -101,38 +101,27 @@ class SystemManager:
             }
 
     async def get_temperatures_from_sensors(self) -> dict:
-        """一次性获取CPU和主板温度（优先sensors命令，失败则回退sysfs）"""
+        """一次性获取CPU和主板温度（优先sensors命令，失败则尝试sudo sensors，最后回退sysfs）"""
         cpu_temp = "未知"
         mobo_temp = "未知"
 
-        try:
-            command = "sensors"
-            self._debug_log(f"执行sensors命令获取温度: {command}")
+        # 尝试 sensors（不加 sudo）
+        cpu_temp, mobo_temp = await self._try_sensors_command("sensors")
 
-            sensors_output = await self.coordinator.run_command(command)
-            if self.debug_enabled:
-                self._debug_log(f"sensors命令输出长度: {len(sensors_output) if sensors_output else 0}")
-
-            if sensors_output:
-                cpu_temp = self.extract_cpu_temp_from_sensors(sensors_output)
-                mobo_temp = self.extract_mobo_temp_from_sensors(sensors_output)
-
+        # 如果 sensors 失败或未找到温度，尝试 sudo sensors（管理员账号通常有sudo权限）
+        if cpu_temp == "未知" or mobo_temp == "未知":
+            self._info_log("普通sensors命令未获取到完整温度，尝试sudo sensors")
+            sudo_cpu, sudo_mobo = await self._try_sensors_command("sudo sensors")
+            if cpu_temp == "未知":
+                cpu_temp = sudo_cpu
                 if cpu_temp != "未知":
-                    self._info_log(f"通过sensors获取CPU温度成功: {cpu_temp}")
-                else:
-                    self._warning_log("sensors命令未找到CPU温度")
-
+                    self._info_log(f"通过sudo sensors获取CPU温度成功: {cpu_temp}")
+            if mobo_temp == "未知":
+                mobo_temp = sudo_mobo
                 if mobo_temp != "未知":
-                    self._info_log(f"通过sensors获取主板温度成功: {mobo_temp}")
-                else:
-                    self._warning_log("sensors命令未找到主板温度")
-            else:
-                self._warning_log("sensors命令无输出，尝试sysfs回退")
+                    self._info_log(f"通过sudo sensors获取主板温度成功: {mobo_temp}")
 
-        except Exception as e:
-            self._warning_log(f"使用sensors命令获取温度失败: {e}，尝试sysfs回退")
-
-        # sensors命令失败或未找到温度时，使用sysfs回退
+        # 最后尝试sysfs回退
         if cpu_temp == "未知" or mobo_temp == "未知":
             self._info_log("使用sysfs回退方法获取温度")
             fallback_temps = await self._get_temperatures_from_sysfs()
@@ -146,6 +135,26 @@ class SystemManager:
                     self._info_log(f"通过sysfs获取主板温度成功: {mobo_temp}")
 
         return {"cpu": cpu_temp, "motherboard": mobo_temp}
+
+    async def _try_sensors_command(self, command: str) -> tuple[str, str]:
+        """执行sensors命令并解析温度，返回 (cpu_temp, mobo_temp)"""
+        cpu_temp = "未知"
+        mobo_temp = "未知"
+        try:
+            self._debug_log(f"执行sensors命令获取温度: {command}")
+            sensors_output = await self.coordinator.run_command(command)
+            if self.debug_enabled:
+                self._debug_log(f"sensors命令输出长度: {len(sensors_output) if sensors_output else 0}")
+
+            if sensors_output:
+                cpu_temp = self.extract_cpu_temp_from_sensors(sensors_output)
+                mobo_temp = self.extract_mobo_temp_from_sensors(sensors_output)
+            else:
+                self._warning_log(f"{command} 命令无输出")
+        except Exception as e:
+            self._warning_log(f"执行 {command} 失败: {e}")
+
+        return cpu_temp, mobo_temp
 
     async def _get_temperatures_from_sysfs(self) -> dict:
         """通过sysfs直接读取温度（不需要root权限或lm-sensors）"""

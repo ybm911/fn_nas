@@ -1092,12 +1092,12 @@ class NetworkSpeedSensor(CoordinatorEntity, SensorEntity):
         speed = iface_speeds.get(f"{self._direction}_speed", 0)
         if speed is None or speed == 0:
             return 0
-        # 返回字节/秒
-        return round(speed, 1)
+        # 返回 MB/s（1 MB = 1024^2 字节）
+        return round(speed / 1024 / 1024, 2)
 
     @property
     def native_unit_of_measurement(self):
-        return "B/s"
+        return "MB/s"
 
     @property
     def extra_state_attributes(self):
@@ -1106,19 +1106,12 @@ class NetworkSpeedSensor(CoordinatorEntity, SensorEntity):
         speed = iface_speeds.get(f"{self._direction}_speed", 0) or 0
         rx_bytes = iface_speeds.get("rx_bytes", 0)
         tx_bytes = iface_speeds.get("tx_bytes", 0)
-        # 格式化显示
-        def fmt_speed(bps):
-            if bps >= 1_000_000:
-                return f"{bps/1_000_000:.2f} MB/s"
-            if bps >= 1_000:
-                return f"{bps/1_000:.1f} KB/s"
-            return f"{bps:.1f} B/s"
         return {
             "接口": self._interface,
             "方向": "下载" if self._direction == "rx" else "上传",
-            "实时速度": fmt_speed(speed),
-            "总接收字节": rx_bytes,
-            "总发送字节": tx_bytes,
+            "实时速度 (MB/s)": round(speed / 1024 / 1024, 2),
+            "总接收": f"{rx_bytes / 1024**3:.2f} GB",
+            "总发送": f"{tx_bytes / 1024**3:.2f} GB",
         }
 
 
@@ -1153,29 +1146,18 @@ class NetworkTraffic7dSensor(CoordinatorEntity, SensorEntity):
         else:
             delta = max(0, current_tx - first_tx)
 
-        # 以字节为单位返回
-        return delta
+        # 返回 GB（1 GB = 1024^3 字节）
+        return round(delta / 1024**3, 2)
 
     @property
     def native_unit_of_measurement(self):
-        return "B"
+        return "GB"
 
     @property
     def extra_state_attributes(self):
         traffic_7d = self.coordinator.data.get("system", {}).get("network_traffic_7d", {})
         iface_data = traffic_7d.get(self._interface, {})
         first_seen = iface_data.get("first_seen", "未知")
-
-        def fmt_bytes(b):
-            if b >= 1024**4:
-                return f"{b/(1024**4):.2f} TB"
-            if b >= 1024**3:
-                return f"{b/(1024**3):.2f} GB"
-            if b >= 1024**2:
-                return f"{b/(1024**2):.2f} MB"
-            if b >= 1024:
-                return f"{b/1024:.1f} KB"
-            return f"{b} B"
 
         first_rx = iface_data.get("rx_bytes_7d", 0)
         first_tx = iface_data.get("tx_bytes_7d", 0)
@@ -1186,7 +1168,7 @@ class NetworkTraffic7dSensor(CoordinatorEntity, SensorEntity):
             "接口": self._interface,
             "方向": "下载" if self._direction == "rx" else "上传",
             "统计起始时间": first_seen,
-            "起始累计值": fmt_bytes(first_rx if self._direction == "rx" else first_tx),
+            "起始累计值": f"{first_rx / 1024**3:.2f} GB" if self._direction == "rx" else f"{first_tx / 1024**3:.2f} GB",
             "当前累计值": fmt_bytes(current_rx if self._direction == "rx" else current_tx),
             "7日总流量": fmt_bytes(self.native_value or 0),
         }
