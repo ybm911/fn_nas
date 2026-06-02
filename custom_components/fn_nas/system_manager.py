@@ -101,35 +101,37 @@ class SystemManager:
             }
 
     async def get_temperatures_from_sensors(self) -> dict:
-        """一次性获取CPU和主板温度（优先sensors命令，失败则尝试sudo sensors，最后回退sysfs）"""
+        """一次性获取CPU和主板温度（优先sensors命令，失败则回退sysfs）"""
         cpu_temp = "未知"
         mobo_temp = "未知"
 
-        # 尝试 sensors（不加 sudo）
+        # 尝试 sensors
         cpu_temp, mobo_temp = await self._try_sensors_command("sensors")
+        have_cpu = cpu_temp != "未知"
+        have_mobo = mobo_temp != "未知"
 
-        # 如果 sensors 失败或未找到温度，尝试 sudo sensors（管理员账号通常有sudo权限）
-        if cpu_temp == "未知" or mobo_temp == "未知":
-            self._info_log("普通sensors命令未获取到完整温度，尝试sudo sensors")
-            sudo_cpu, sudo_mobo = await self._try_sensors_command("sudo sensors")
-            if cpu_temp == "未知":
-                cpu_temp = sudo_cpu
-                if cpu_temp != "未知":
-                    self._info_log(f"通过sudo sensors获取CPU温度成功: {cpu_temp}")
-            if mobo_temp == "未知":
-                mobo_temp = sudo_mobo
-                if mobo_temp != "未知":
-                    self._info_log(f"通过sudo sensors获取主板温度成功: {mobo_temp}")
+        # use_sudo=False 且 sensors 未获取到温度时，尝试显式 sudo sensors
+        # （user_sudo=False 意味着 SSH 会话本身是普通用户权限，但可能有 sudo 能力）
+        if not have_cpu or not have_mobo:
+            if not getattr(self.coordinator, 'use_sudo', True):
+                self._info_log("尝试 sudo sensors")
+                sudo_cpu, sudo_mobo = await self._try_sensors_command("sudo -n sensors")
+                if not have_cpu:
+                    cpu_temp = sudo_cpu
+                    have_cpu = cpu_temp != "未知"
+                if not have_mobo:
+                    mobo_temp = sudo_mobo
+                    have_mobo = mobo_temp != "未知"
 
-        # 最后尝试sysfs回退
-        if cpu_temp == "未知" or mobo_temp == "未知":
+        # sysfs 回退
+        if not have_cpu or not have_mobo:
             self._info_log("使用sysfs回退方法获取温度")
             fallback_temps = await self._get_temperatures_from_sysfs()
-            if cpu_temp == "未知":
+            if not have_cpu:
                 cpu_temp = fallback_temps["cpu"]
                 if cpu_temp != "未知":
                     self._info_log(f"通过sysfs获取CPU温度成功: {cpu_temp}")
-            if mobo_temp == "未知":
+            if not have_mobo:
                 mobo_temp = fallback_temps["motherboard"]
                 if mobo_temp != "未知":
                     self._info_log(f"通过sysfs获取主板温度成功: {mobo_temp}")
@@ -161,6 +163,7 @@ class SystemManager:
         cpu_temp = "未知"
         mobo_temp = "未知"
         discovered = {"cpu": [], "mobo": []}
+        unlabeled = []  # 无法判断类型的传感器
 
         # 方法1: 通过 /sys/class/thermal/thermal_zone* 读取
         try:
@@ -186,15 +189,24 @@ class SystemManager:
                     except ValueError:
                         continue
                     type_str = type_str.strip().lower()
-                    if not (10 <= temp_c <= 110):
+                    # 放宽温度范围，排除明显异常值即可
+                    if not (0 <= temp_c <= 120):
                         continue
 
-                    if any(k in type_str for k in ["x86_pkg", "cpu", "core"]):
+                    if any(k in type_str for k in [
+                        "x86_pkg", "x86", "cpu", "core", "pkg",
+                        "soc", "k10temp", "zen", "ddr", "tjmax"
+                    ]):
                         discovered["cpu"].append(temp_c)
                         self._debug_log(f"thermal_zone{zone_num} type={type_str} -> CPU候选 {temp_c}°C")
                     elif any(k in type_str for k in ["acpi", "acpitz", "pch", "chipset"]):
                         discovered["mobo"].append(temp_c)
                         self._debug_log(f"thermal_zone{zone_num} type={type_str} -> 主板候选 {temp_c}°C")
+                    else:
+                        # 未知类型，记下来稍后启发式判断
+                        self._debug_log(f"thermal_zone{zone_num} type={type_str} -> 未分类 {temp_c}°C")
+                        if temp_c > 0:
+                            unlabeled.append(("thermal", temp_c, type_str))
         except Exception as e:
             self._debug_log(f"thermal_zone读取失败: {e}")
 
@@ -211,7 +223,7 @@ class SystemManager:
                     hwmon_name = await self.coordinator.run_command(
                         f"cat {hwmon_path}/name 2>/dev/null || true"
                     )
-                    hwmon_name = hwmon_name.strip() if hwmon_name else ""
+                    hwmon_name = hwmon_name.strip().lower() if hwmon_name else ""
 
                     # 枚举此hwmon下的所有温度输入
                     temp_inputs = await self.coordinator.run_command(
@@ -238,23 +250,31 @@ class SystemManager:
                             temp_c = float(temp_raw.strip()) / 1000.0
                         except ValueError:
                             continue
-                        if not (10 <= temp_c <= 110):
+                        if not (0 <= temp_c <= 120):
                             continue
 
-                        # 判断是CPU还是主板
-                        cpu_keywords = ["cpu", "core", "package", "tctl", "tdie", "k10temp", "zen"]
-                        mobo_keywords = ["systin", "system", "mb", "mobo", "motherboard", "temp1",
-                                         "pch", "chipset", "board", "platform", "acpi"]
+                        # 判断是CPU还是主板 - 扩展关键词
+                        cpu_keywords = [
+                            "cpu", "core", "package", "tctl", "tdie",
+                            "k10temp", "zen", "tjmax", "ccd", "iod",
+                            "soc", "vcore", "gt_core"
+                        ]
+                        mobo_keywords = [
+                            "systin", "system", "mb", "mobo", "motherboard",
+                            "temp1", "pch", "chipset", "board", "platform",
+                            "acpi", "acpitz", "sio", "superio", "it87",
+                            "nct", "w83627", "f71868", "f71869",
+                        ]
+                        # hwmon 驱动名也可用于判断
+                        cpu_hwmon_drivers = [
+                            "coretemp", "k10temp", "k8temp", "acpitz"
+                        ]
 
                         is_cpu = any(k in label for k in cpu_keywords) or \
-                                 any(k in hwmon_name.lower() for k in cpu_keywords)
+                                 any(k in hwmon_name for k in cpu_keywords) or \
+                                 any(k in hwmon_name for k in cpu_hwmon_drivers)
                         is_mobo = any(k in label for k in mobo_keywords) or \
-                                  any(k in hwmon_name.lower() for k in mobo_keywords)
-
-                        # 如果没有标签，用名字启发式判断
-                        if not label and not is_cpu and not is_mobo:
-                            if any(k in hwmon_name.lower() for k in ["k10temp", "coretemp"]):
-                                is_cpu = True
+                                  any(k in hwmon_name for k in mobo_keywords)
 
                         if is_cpu:
                             discovered["cpu"].append(temp_c)
@@ -262,8 +282,27 @@ class SystemManager:
                         elif is_mobo:
                             discovered["mobo"].append(temp_c)
                             self._debug_log(f"hwmon {hwmon_name} temp{temp_id} label={label} -> 主板候选 {temp_c}°C")
+                        else:
+                            self._debug_log(f"hwmon {hwmon_name} temp{temp_id} label={label} -> 未分类 {temp_c}°C")
+                            if temp_c > 0:
+                                unlabeled.append(("hwmon", temp_c, f"{hwmon_name}/{label}"))
         except Exception as e:
             self._debug_log(f"hwmon读取失败: {e}")
+
+        # 启发式：如果未分类的传感器中有合理值，按场景分配
+        if unlabeled and (not discovered["cpu"] or not discovered["mobo"]):
+            # 取所有未分类温度的中位数
+            temps = sorted([t[1] for t in unlabeled])
+            if temps:
+                if not discovered["cpu"]:
+                    # 最高温通常来自CPU（除非有GPU）
+                    discovered["cpu"].append(temps[-1])
+                    self._debug_log(f"启发式将最高未分类温度 {temps[-1]}°C 分配给CPU")
+                if not discovered["mobo"] and len(temps) > 1:
+                    # 次高或中位温分配给主板
+                    mid = temps[len(temps)//2 - 1] if len(temps) > 2 else temps[0]
+                    discovered["mobo"].append(mid)
+                    self._debug_log(f"启发式将未分类温度 {mid}°C 分配给主板")
 
         # 从候选中取最合理值（CPU取最高，主板取中位数）
         if discovered["cpu"]:

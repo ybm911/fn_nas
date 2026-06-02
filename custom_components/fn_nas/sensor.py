@@ -1087,13 +1087,16 @@ class NetworkSpeedSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        net_speeds = self.coordinator.data.get("system", {}).get("network_speeds", {})
-        iface_speeds = net_speeds.get(self._interface, {})
-        speed = iface_speeds.get(f"{self._direction}_speed", 0)
-        if speed is None or speed == 0:
+        try:
+            net_speeds = self.coordinator.data.get("system", {}).get("network_speeds", {})
+            iface_speeds = net_speeds.get(self._interface, {})
+            speed = iface_speeds.get(f"{self._direction}_speed", 0)
+            if speed is None or speed == 0:
+                return 0
+            # 返回 MB/s（1 MB = 1024^2 字节）
+            return round(speed / 1024 / 1024, 2)
+        except Exception:
             return 0
-        # 返回 MB/s（1 MB = 1024^2 字节）
-        return round(speed / 1024 / 1024, 2)
 
     @property
     def native_unit_of_measurement(self):
@@ -1134,20 +1137,23 @@ class NetworkTraffic7dSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        traffic_7d = self.coordinator.data.get("system", {}).get("network_traffic_7d", {})
-        iface_data = traffic_7d.get(self._interface, {})
-        first_rx = iface_data.get("rx_bytes_7d", 0)
-        first_tx = iface_data.get("tx_bytes_7d", 0)
-        current_rx = iface_data.get("current_rx_bytes", 0)
-        current_tx = iface_data.get("current_tx_bytes", 0)
+        try:
+            traffic_7d = self.coordinator.data.get("system", {}).get("network_traffic_7d", {})
+            iface_data = traffic_7d.get(self._interface, {})
+            first_rx = iface_data.get("rx_bytes_7d", 0) or 0
+            first_tx = iface_data.get("tx_bytes_7d", 0) or 0
+            current_rx = iface_data.get("current_rx_bytes", 0) or 0
+            current_tx = iface_data.get("current_tx_bytes", 0) or 0
 
-        if self._direction == "rx":
-            delta = max(0, current_rx - first_rx)
-        else:
-            delta = max(0, current_tx - first_tx)
+            if self._direction == "rx":
+                delta = max(0, current_rx - first_rx)
+            else:
+                delta = max(0, current_tx - first_tx)
 
-        # 返回 GB（1 GB = 1024^3 字节）
-        return round(delta / 1024**3, 2)
+            # 返回 GB（1 GB = 1024^3 字节）
+            return round(delta / 1024**3, 2)
+        except Exception:
+            return 0
 
     @property
     def native_unit_of_measurement(self):
