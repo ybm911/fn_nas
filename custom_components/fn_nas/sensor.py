@@ -1,0 +1,1192 @@
+import logging
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.const import UnitOfTemperature
+from .const import (
+    DOMAIN, HDD_TEMP, HDD_STATUS, SYSTEM_INFO, ICON_DISK, 
+    ICON_TEMPERATURE, ATTR_DISK_MODEL, ATTR_SERIAL_NO,
+    ATTR_POWER_ON_HOURS, ATTR_TOTAL_CAPACITY, ATTR_HEALTH_STATUS,
+    DEVICE_ID_NAS, DATA_UPDATE_COORDINATOR, ZFS_POOL, ICON_ZFS,
+    ATTR_ZPOOL_NAME, ATTR_ZPOOL_HEALTH, ATTR_ZPOOL_SIZE,
+    ATTR_ZPOOL_ALLOC, ATTR_ZPOOL_FREE, ATTR_ZPOOL_CAPACITY,
+    ATTR_ZPOOL_FRAGMENTATION, ATTR_ZPOOL_CKPOINT, ATTR_ZPOOL_EXPANDSZ,
+    ATTR_ZPOOL_DEDUP, ATTR_ZPOOL_SCRUB_STATUS, ATTR_ZPOOL_SCRUB_PROGRESS,
+    ATTR_ZPOOL_SCRUB_SCAN_RATE, ATTR_ZPOOL_SCRUB_TIME_REMAINING,
+    ATTR_ZPOOL_SCRUB_ISSUED, ATTR_ZPOOL_SCRUB_REPAIRED, DEVICE_ID_ZFS
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    domain_data = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = domain_data[DATA_UPDATE_COORDINATOR]
+    ups_coordinator = domain_data["ups_coordinator"]
+    
+    entities = []
+    existing_ids = set()
+    
+    # 添加硬盘传感器
+    for disk in coordinator.data.get("disks", []):
+        # 温度传感器
+        temp_uid = f"{config_entry.entry_id}_{disk['device']}_temperature"
+        if temp_uid not in existing_ids:
+            entities.append(
+                DiskSensor(
+                    coordinator, 
+                    disk["device"], 
+                    HDD_TEMP,
+                    f"硬盘 {disk.get('model', '未知')} 温度",
+                    temp_uid,
+                    UnitOfTemperature.CELSIUS,
+                    ICON_TEMPERATURE,
+                    disk
+                )
+            )
+            existing_ids.add(temp_uid)
+        
+
+        
+        # 硬盘状态传感器
+        status_uid = f"{config_entry.entry_id}_{disk['device']}_status"
+        if status_uid not in existing_ids:
+            entities.append(
+                DiskSensor(
+                    coordinator, 
+                    disk["device"], 
+                    HDD_STATUS,
+                    f"硬盘 {disk.get('model', '未知')} 状态",
+                    status_uid,
+                    None,
+                    ICON_DISK,
+                    disk
+                )
+            )
+            existing_ids.add(status_uid)
+    
+    # 添加系统信息传感器
+    system_uid = f"{config_entry.entry_id}_system_status"
+    if system_uid not in existing_ids:
+        entities.append(
+            SystemSensor(
+                coordinator,
+                "系统状态",
+                system_uid,
+                None,
+                "mdi:server",
+            )
+        )
+        existing_ids.add(system_uid)
+    
+    # 添加CPU温度传感器
+    cpu_temp_uid = f"{config_entry.entry_id}_cpu_temperature"
+    if cpu_temp_uid not in existing_ids:
+        entities.append(
+            CPUTempSensor(
+                coordinator,
+                "CPU温度",
+                cpu_temp_uid,
+                UnitOfTemperature.CELSIUS,
+                "mdi:thermometer",
+            )
+        )
+        existing_ids.add(cpu_temp_uid)
+    
+    # 添加主板温度传感器
+    mobo_temp_uid = f"{config_entry.entry_id}_motherboard_temperature"
+    if mobo_temp_uid not in existing_ids:
+        entities.append(
+            MoboTempSensor(
+                coordinator,
+                "主板温度",
+                mobo_temp_uid,
+                UnitOfTemperature.CELSIUS,
+                "mdi:thermometer",
+            )
+        )
+        existing_ids.add(mobo_temp_uid)
+
+    # 添加虚拟机状态传感器
+    if "vms" in coordinator.data:
+        for vm in coordinator.data["vms"]:
+            vm_uid = f"{config_entry.entry_id}_flynas_vm_{vm['name']}_status"
+            if vm_uid not in existing_ids:
+                entities.append(
+                    VMStatusSensor(
+                        coordinator, 
+                        vm["name"],
+                        vm.get("title", vm["name"]),
+                        config_entry.entry_id
+                    )
+                )
+                existing_ids.add(vm_uid)
+
+    # 添加UPS传感器（使用UPS协调器）
+    if ups_coordinator.data:  # 检查是否有UPS数据
+        ups_data = ups_coordinator.data
+        
+        # UPS电池电量传感器
+        ups_battery_uid = f"{config_entry.entry_id}_ups_battery"
+        if ups_battery_uid not in existing_ids:
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS电池电量",
+                    ups_battery_uid,
+                    "%",
+                    "mdi:battery",
+                    "battery_level",
+                    device_class=SensorDeviceClass.BATTERY,
+                    state_class=SensorStateClass.MEASUREMENT
+                )
+            )
+            existing_ids.add(ups_battery_uid)
+        
+        # UPS剩余时间传感器
+        ups_runtime_uid = f"{config_entry.entry_id}_ups_runtime"
+        if ups_runtime_uid not in existing_ids:
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS剩余时间",
+                    ups_runtime_uid,
+                    "分钟",
+                    "mdi:clock",
+                    "runtime_remaining",
+                    state_class=SensorStateClass.MEASUREMENT
+                )
+            )
+            existing_ids.add(ups_runtime_uid)
+        
+        # UPS输出电压传感器
+        ups_output_voltage_uid = f"{config_entry.entry_id}_ups_output_voltage"
+        if ups_output_voltage_uid not in existing_ids:
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS输出电压",
+                    ups_output_voltage_uid,
+                    "V",
+                    "mdi:lightning-bolt-outline",
+                    "output_voltage",
+                    device_class=SensorDeviceClass.VOLTAGE,
+                    state_class=SensorStateClass.MEASUREMENT
+                )
+            )
+            existing_ids.add(ups_output_voltage_uid)
+        
+        # UPS负载传感器
+        ups_load_uid = f"{config_entry.entry_id}_ups_load"
+        if ups_load_uid not in existing_ids:
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS负载",
+                    ups_load_uid,
+                    "%",
+                    "mdi:gauge",
+                    "load_percent",
+                    state_class=SensorStateClass.MEASUREMENT
+                )
+            )
+            existing_ids.add(ups_load_uid)
+        
+        # UPS型号传感器
+        ups_model_uid = f"{config_entry.entry_id}_ups_model"
+        if ups_model_uid not in existing_ids:
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS型号",
+                    ups_model_uid,
+                    None,
+                    "mdi:information",
+                    "model"
+                )
+            )
+            existing_ids.add(ups_model_uid)
+        
+        # UPS状态传感器
+        ups_status_uid = f"{config_entry.entry_id}_ups_status"
+        if ups_status_uid not in existing_ids:
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS状态",
+                    ups_status_uid,
+                    None,
+                    "mdi:power-plug",
+                    "status"
+                )
+            )
+            existing_ids.add(ups_status_uid)
+
+        if coordinator.data.get("docker_containers") and coordinator.enable_docker:
+            for container in coordinator.data["docker_containers"]:
+                safe_name = container["name"].replace(" ", "_").replace("/", "_")
+                sensor_uid = f"{config_entry.entry_id}_docker_{safe_name}_status"
+                if sensor_uid not in existing_ids:
+                    entities.append(
+                        DockerContainerStatusSensor(
+                            coordinator, 
+                            container["name"],
+                            safe_name,
+                            config_entry.entry_id
+                        )
+                    )
+                    existing_ids.add(sensor_uid)
+    
+    # 添加ZFS存储池传感器
+    if "zpools" in coordinator.data:
+        for zpool in coordinator.data["zpools"]:
+            safe_name = zpool["name"].replace(" ", "_").replace("/", "_").replace(".", "_")
+            
+            # ZFS存储池健康状态传感器
+            health_uid = f"{config_entry.entry_id}_zpool_{safe_name}_health"
+            if health_uid not in existing_ids:
+                entities.append(
+                    ZFSPoolSensor(
+                        coordinator,
+                        zpool["name"],
+                        "health",
+                        f"ZFS {zpool['name']} 健康状态",
+                        health_uid,
+                        None,
+                        ICON_ZFS,
+                        zpool
+                    )
+                )
+                existing_ids.add(health_uid)
+            
+            # ZFS存储池容量使用率传感器
+            capacity_uid = f"{config_entry.entry_id}_zpool_{safe_name}_capacity"
+            if capacity_uid not in existing_ids:
+                entities.append(
+                    ZFSPoolSensor(
+                        coordinator,
+                        zpool["name"],
+                        "capacity",
+                        f"ZFS {zpool['name']} 使用率",
+                        capacity_uid,
+                        "%",
+                        ICON_ZFS,
+                        zpool,
+                        device_class=SensorDeviceClass.POWER_FACTOR,
+                        state_class=SensorStateClass.MEASUREMENT
+                    )
+                )
+                existing_ids.add(capacity_uid)
+            
+            # ZFS存储池总大小传感器
+            size_uid = f"{config_entry.entry_id}_zpool_{safe_name}_size"
+            if size_uid not in existing_ids:
+                entities.append(
+                    ZFSPoolSensor(
+                        coordinator,
+                        zpool["name"],
+                        "size",
+                        f"ZFS {zpool['name']} 容量",
+                        size_uid,
+                        None,  # 动态确定单位
+                        ICON_ZFS,
+                        zpool
+                    )
+                )
+                existing_ids.add(size_uid)
+            
+            # ZFS存储池scrub进度传感器
+            scrub_uid = f"{config_entry.entry_id}_zpool_{safe_name}_scrub"
+            if scrub_uid not in existing_ids:
+                entities.append(
+                    ZFSScrubSensor(
+                        coordinator,
+                        zpool["name"],
+                        f"ZFS {zpool['name']} 检查进度",
+                        scrub_uid
+                    )
+                )
+                existing_ids.add(scrub_uid)
+    
+    # 添加剩余内存传感器
+    mem_available_uid = f"{config_entry.entry_id}_memory_available"
+    if mem_available_uid not in existing_ids:
+        entities.append(
+            MemoryAvailableSensor(
+                coordinator,
+                "可用内存",
+                mem_available_uid,
+                "GB",
+                "mdi:memory"
+            )
+        )
+        existing_ids.add(mem_available_uid)
+    
+    # 添加存储卷的剩余容量传感器（每个卷一个）
+    system_data = coordinator.data.get("system", {})
+    volumes = system_data.get("volumes", {})
+    for mount_point in volumes:
+        # 创建剩余容量传感器
+        vol_avail_uid = f"{config_entry.entry_id}_{mount_point.replace('/', '_')}_available"
+        if vol_avail_uid not in existing_ids:
+            entities.append(
+                VolumeAvailableSensor(
+                    coordinator,
+                    f"{mount_point} 可用空间",
+                    vol_avail_uid,
+                    "mdi:harddisk",
+                    mount_point
+                )
+            )
+            existing_ids.add(vol_avail_uid)
+
+    # 添加CPU使用率传感器
+    cpu_usage_uid = f"{config_entry.entry_id}_cpu_usage"
+    if cpu_usage_uid not in existing_ids:
+        entities.append(
+            CpuUsageSensor(
+                coordinator,
+                "CPU使用率",
+                cpu_usage_uid,
+            )
+        )
+        existing_ids.add(cpu_usage_uid)
+
+    # 添加内存使用率传感器
+    mem_usage_uid = f"{config_entry.entry_id}_memory_usage"
+    if mem_usage_uid not in existing_ids:
+        entities.append(
+            MemoryUsageSensor(
+                coordinator,
+                "内存使用率",
+                mem_usage_uid,
+            )
+        )
+        existing_ids.add(mem_usage_uid)
+
+    # 添加网络传感器，自动检测首个非lo接口
+    system_data = coordinator.data.get("system", {})
+    net_speeds = system_data.get("network_speeds", {})
+    # 找到第一个非lo接口
+    main_iface = None
+    for iface in net_speeds:
+        if iface != "lo":
+            main_iface = iface
+            break
+
+    if main_iface:
+        # 网络下载速度
+        rx_speed_uid = f"{config_entry.entry_id}_{main_iface}_rx_speed"
+        if rx_speed_uid not in existing_ids:
+            entities.append(
+                NetworkSpeedSensor(
+                    coordinator,
+                    f"{main_iface} 下载速度",
+                    rx_speed_uid,
+                    main_iface,
+                    "rx",
+                )
+            )
+            existing_ids.add(rx_speed_uid)
+
+        # 网络上传速度
+        tx_speed_uid = f"{config_entry.entry_id}_{main_iface}_tx_speed"
+        if tx_speed_uid not in existing_ids:
+            entities.append(
+                NetworkSpeedSensor(
+                    coordinator,
+                    f"{main_iface} 上传速度",
+                    tx_speed_uid,
+                    main_iface,
+                    "tx",
+                )
+            )
+            existing_ids.add(tx_speed_uid)
+
+        # 近7日总下载
+        rx_7d_uid = f"{config_entry.entry_id}_{main_iface}_rx_7d"
+        if rx_7d_uid not in existing_ids:
+            entities.append(
+                NetworkTraffic7dSensor(
+                    coordinator,
+                    f"{main_iface} 近7日总下载",
+                    rx_7d_uid,
+                    main_iface,
+                    "rx",
+                )
+            )
+            existing_ids.add(rx_7d_uid)
+
+        # 近7日总上传
+        tx_7d_uid = f"{config_entry.entry_id}_{main_iface}_tx_7d"
+        if tx_7d_uid not in existing_ids:
+            entities.append(
+                NetworkTraffic7dSensor(
+                    coordinator,
+                    f"{main_iface} 近7日总上传",
+                    tx_7d_uid,
+                    main_iface,
+                    "tx",
+                )
+            )
+            existing_ids.add(tx_7d_uid)
+
+    async_add_entities(entities)
+
+
+class DiskSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, device_id, sensor_type, name, unique_id, unit, icon, disk_info):
+        super().__init__(coordinator)
+        self.device_id = device_id
+        self.sensor_type = sensor_type
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self.disk_info = disk_info
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"disk_{device_id}")},
+            "name": disk_info.get("model", "未知硬盘"),
+            "manufacturer": "硬盘设备",
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+    
+    @property
+    def native_value(self):
+        for disk in self.coordinator.data.get("disks", []):
+            if disk["device"] == self.device_id:
+                if self.sensor_type == HDD_TEMP:
+                    temp = disk.get("temperature")
+                    if temp is None or temp == "未知":
+                        return None
+                    if isinstance(temp, str):
+                        try:
+                            if "°C" in temp:
+                                return float(temp.replace("°C", "").strip())
+                            return float(temp)
+                        except ValueError:
+                            return None
+                    elif isinstance(temp, (int, float)):
+                        return temp
+                    return None
+
+                elif self.sensor_type == HDD_STATUS:
+                    return disk.get("status", "未知")
+        return None
+    
+    @property
+    def device_class(self):
+        if self.sensor_type == HDD_TEMP:
+            return SensorDeviceClass.TEMPERATURE
+        return None
+    
+    @property
+    def native_unit_of_measurement(self):
+        """返回内存单位"""
+        return self._attr_native_unit_of_measurement
+    
+    @property
+    def extra_state_attributes(self):
+        return {
+            ATTR_DISK_MODEL: self.disk_info.get("model", "未知"),
+            ATTR_SERIAL_NO: self.disk_info.get("serial", "未知"),
+            ATTR_POWER_ON_HOURS: self.disk_info.get("power_on_hours", "未知"),
+            ATTR_TOTAL_CAPACITY: self.disk_info.get("capacity", "未知"),
+            ATTR_HEALTH_STATUS: self.disk_info.get("health", "未知"),
+            "设备ID": self.device_id,
+            "状态": self.disk_info.get("status", "未知")
+        }
+
+class SystemSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, name, unique_id, unit, icon):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+        self._last_uptime = None
+    
+    @property
+    def native_value(self):
+        system_data = self.coordinator.data.get("system", {})
+        status = system_data.get("status", "unknown")
+        
+        if status == "off":
+            return "离线"
+        if status == "rebooting":
+            return "重启中"
+        if status == "unknown":
+            return "状态未知"
+        
+        try:
+            uptime_seconds = system_data.get("uptime_seconds", 0)
+            if self._last_uptime == uptime_seconds:
+                return self._last_value
+            
+            hours = float(uptime_seconds) / 3600
+            value = f"已运行 {hours:.1f}小时"
+            self._last_value = value
+            self._last_uptime = uptime_seconds
+            return value
+        except (ValueError, TypeError):
+            return "运行中"
+    
+    @property
+    def extra_state_attributes(self):
+        system_data = self.coordinator.data.get("system", {})
+        return {
+            "运行时间": system_data.get("uptime", "未知"),
+            "系统状态": system_data.get("status", "unknown"),
+            "主机地址": self.coordinator.host,
+            "CPU温度": system_data.get("cpu_temperature", "未知"),
+            "主板温度": system_data.get("motherboard_temperature", "未知")
+        }
+
+class CPUTempSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, name, unique_id, unit, icon):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+    
+    @property
+    def native_value(self):
+        system_data = self.coordinator.data.get("system", {})
+        temp_str = system_data.get("cpu_temperature", "未知")
+        
+        if system_data.get("status") == "off":
+            return None
+        
+        if temp_str is None or temp_str == "未知":
+            return None
+        
+        if isinstance(temp_str, (int, float)):
+            return temp_str
+            
+        if "°C" in temp_str:
+            try:
+                return float(temp_str.replace("°C", "").strip())
+            except:
+                return None
+        return None
+
+class MoboTempSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, name, unique_id, unit, icon):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+    
+    @property
+    def native_value(self):
+        system_data = self.coordinator.data.get("system", {})
+        temp_str = system_data.get("motherboard_temperature", "未知")
+        
+        if system_data.get("status") == "off":
+            return None
+        
+        if temp_str is None or temp_str == "未知":
+            return None
+        
+        if isinstance(temp_str, (int, float)):
+            return temp_str
+            
+        try:
+            cleaned = temp_str.lower().replace('°c', '').replace('c', '').strip()
+            return float(cleaned)
+        except (ValueError, TypeError) as e:
+            _LOGGER.warning("主板温度解析失败: 原始值='%s', 错误: %s", temp_str, str(e))
+            return None
+
+class UPSSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, name, unique_id, unit, icon, data_key, device_class=None, state_class=None):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self.data_key = data_key
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, "flynas_ups")},
+            "name": "飞牛NAS UPS",
+            "manufacturer": "UPS设备",
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+        
+        # 设置设备类和状态类（如果提供）
+        if device_class:
+            self._attr_device_class = device_class
+        if state_class:
+            self._attr_state_class = state_class
+    
+    @property
+    def native_value(self):
+        return self.coordinator.data.get(self.data_key)  # 直接使用协调器的数据
+    
+    @property
+    def extra_state_attributes(self):
+        attributes = {
+            "最后更新时间": self.coordinator.data.get("last_update", "未知"),
+            "UPS类型": self.coordinator.data.get("ups_type", "未知")
+        }
+        
+        # 添加原始字符串值（如果存在）
+        if f"{self.data_key}_str" in self.coordinator.data:
+            attributes["原始值"] = self.coordinator.data[f"{self.data_key}_str"]
+        
+        return attributes
+
+class VMStatusSensor(CoordinatorEntity, SensorEntity):
+    """虚拟机状态传感器"""
+    
+    def __init__(self, coordinator, vm_name, vm_title, entry_id):
+        super().__init__(coordinator)
+        self.vm_name = vm_name
+        self.vm_title = vm_title
+        self._attr_name = f"{vm_title} 状态"
+        self._attr_unique_id = f"{entry_id}_flynas_vm_{vm_name}_status"  # 使用entry_id确保唯一性
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"vm_{vm_name}")},
+            "name": vm_title,
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+    
+    @property
+    def native_value(self):
+        """返回虚拟机状态"""
+        for vm in self.coordinator.data.get("vms", []):
+            if vm["name"] == self.vm_name:
+                # 将状态转换为中文
+                state_map = {
+                    "running": "运行中",
+                    "shut off": "已关闭",
+                    "paused": "已暂停",
+                    "rebooting": "重启中",
+                    "crashed": "崩溃"
+                }
+                return state_map.get(vm["state"], vm["state"])
+        return "未知"
+    
+    @property
+    def icon(self):
+        """根据状态返回图标"""
+        for vm in self.coordinator.data.get("vms", []):
+            if vm["name"] == self.vm_name:
+                if vm["state"] == "running":
+                    return "mdi:server"
+                elif vm["state"] == "shut off":
+                    return "mdi:server-off"
+                elif vm["state"] == "rebooting":
+                    return "mdi:server-security"
+        return "mdi:server"
+
+# 添加DockerContainerStatusSensor类
+class DockerContainerStatusSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, container_name, safe_name, entry_id):
+        super().__init__(coordinator)
+        self.container_name = container_name
+        self._attr_name = f"{container_name} 状态"
+        self._attr_unique_id = f"{entry_id}_docker_{safe_name}_status"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"docker_{safe_name}")},
+            "name": container_name,
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+
+    @property
+    def native_value(self):
+        for container in self.coordinator.data.get("docker_containers", []):
+            if container["name"] == self.container_name:
+                # 状态映射为中文
+                status_map = {
+                    "running": "运行中",
+                    "exited": "已停止",
+                    "paused": "已暂停",
+                    "restarting": "重启中",
+                    "dead": "死亡"
+                }
+                return status_map.get(container["status"], container["status"])
+        return "未知"
+
+class MemoryAvailableSensor(CoordinatorEntity, SensorEntity):
+    """剩余内存传感器（包含总内存和已用内存作为属性）"""
+    
+    def __init__(self, coordinator, name, unique_id, unit, icon):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+    
+    @property
+    def native_value(self):
+        """返回可用内存（GB）"""
+        system_data = self.coordinator.data.get("system", {})
+        mem_available = system_data.get("memory_available")
+        
+        if mem_available is None or mem_available == "未知":
+            return None
+        
+        try:
+            # 将字节转换为GB
+            return round(float(mem_available) / (1024 ** 3), 2)
+        except (TypeError, ValueError):
+            return None
+    
+    @property
+    def native_unit_of_measurement(self):
+        """返回内存单位"""
+        return self._attr_native_unit_of_measurement
+    
+    @property
+    def extra_state_attributes(self):
+        """返回总内存和已用内存（GB）以及原始字节值"""
+        system_data = self.coordinator.data.get("system", {})
+        mem_total = system_data.get("memory_total")
+        mem_used = system_data.get("memory_used")
+        mem_available = system_data.get("memory_available")
+        
+        # 转换为GB
+        try:
+            mem_total_gb = round(float(mem_total) / (1024 ** 3), 2) if mem_total and mem_total != "未知" else None
+        except:
+            mem_total_gb = None
+            
+        try:
+            mem_used_gb = round(float(mem_used) / (1024 ** 3), 2) if mem_used and mem_used != "未知" else None
+        except:
+            mem_used_gb = None
+            
+        return {
+            "总内存 (GB)": mem_total_gb,
+            "已用内存 (GB)": mem_used_gb
+        }
+
+class VolumeAvailableSensor(CoordinatorEntity, SensorEntity):
+    """存储卷剩余容量传感器（包含总容量和已用容量作为属性）"""
+    
+    def __init__(self, coordinator, name, unique_id, icon, mount_point):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_icon = icon
+        self.mount_point = mount_point
+        
+        # 设备信息，归属到飞牛NAS系统
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+        
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+    
+    @property
+    def native_value(self):
+        """返回剩余容量（数值）"""
+        system_data = self.coordinator.data.get("system", {})
+        volumes = system_data.get("volumes", {})
+        vol_info = volumes.get(self.mount_point, {})
+        
+        avail_str = vol_info.get("available", "未知")
+        if avail_str == "未知":
+            return None
+        
+        try:
+            numeric_part = ''.join(filter(lambda x: x.isdigit() or x == '.', avail_str))
+            return float(numeric_part)
+        except (TypeError, ValueError):
+            return None
+    
+    @property
+    def native_unit_of_measurement(self):
+        """动态返回单位"""
+        system_data = self.coordinator.data.get("system", {})
+        volumes = system_data.get("volumes", {})
+        vol_info = volumes.get(self.mount_point, {})
+        
+        avail_str = vol_info.get("available", "")
+        if avail_str.endswith("T") or avail_str.endswith("Ti"):
+            return "TB"
+        elif avail_str.endswith("G") or avail_str.endswith("Gi"):
+            return "GB"
+        elif avail_str.endswith("M") or avail_str.endswith("Mi"):
+            return "MB"
+        else:
+            return None  # 未知单位
+    
+    @property
+    def extra_state_attributes(self):
+        system_data = self.coordinator.data.get("system", {})
+        volumes = system_data.get("volumes", {})
+        vol_info = volumes.get(self.mount_point, {})
+        
+        return {
+            "挂载点": self.mount_point,
+            "文件系统": vol_info.get("filesystem", "未知"),
+            "总容量": vol_info.get("size", "未知"),
+            "已用容量": vol_info.get("used", "未知"),
+            "使用率": vol_info.get("use_percent", "未知")
+        }
+
+class ZFSPoolSensor(CoordinatorEntity, SensorEntity):
+    """ZFS存储池传感器"""
+    
+    def __init__(self, coordinator, zpool_name, sensor_type, name, unique_id, unit, icon, zpool_info, device_class=None, state_class=None):
+        super().__init__(coordinator)
+        self.zpool_name = zpool_name
+        self.sensor_type = sensor_type
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self.zpool_info = zpool_info
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_ZFS)},
+            "name": "ZFS存储池",
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+        
+        # 设置设备类和状态类（如果提供）
+        if device_class:
+            self._attr_device_class = device_class
+        if state_class:
+            self._attr_state_class = state_class
+    
+    @property
+    def native_value(self):
+        """返回传感器的值"""
+        for zpool in self.coordinator.data.get("zpools", []):
+            if zpool["name"] == self.zpool_name:
+                if self.sensor_type == "health":
+                    # 健康状态中英文映射
+                    health_map = {
+                        "ONLINE": "在线",
+                        "DEGRADED": "降级",
+                        "FAULTED": "故障",
+                        "OFFLINE": "离线",
+                        "REMOVED": "已移除",
+                        "UNAVAIL": "不可用"
+                    }
+                    return health_map.get(zpool.get("health", "UNKNOWN"), zpool.get("health", "未知"))
+                elif self.sensor_type == "capacity":
+                    # 返回使用率数值（去掉百分号）
+                    capacity = zpool.get("capacity", "0%")
+                    try:
+                        return float(capacity.replace("%", ""))
+                    except ValueError:
+                        return None
+                elif self.sensor_type == "size":
+                    # 返回总大小的数值部分
+                    size = zpool.get("size", "0")
+                    try:
+                        # 提取数字部分
+                        import re
+                        match = re.search(r'([\d.]+)', size)
+                        if match:
+                            return float(match.group(1))
+                        return None
+                    except (ValueError, AttributeError):
+                        return None
+        return None
+    
+    @property
+    def native_unit_of_measurement(self):
+        """返回内存单位"""
+        return self._attr_native_unit_of_measurement
+    
+    @property
+    def extra_state_attributes(self):
+        """返回额外的状态属性"""
+        for zpool in self.coordinator.data.get("zpools", []):
+            if zpool["name"] == self.zpool_name:
+                return {
+                    ATTR_ZPOOL_NAME: zpool.get("name", "未知"),
+                    ATTR_ZPOOL_HEALTH: zpool.get("health", "未知"),
+                    ATTR_ZPOOL_SIZE: zpool.get("size", "未知"),
+                    ATTR_ZPOOL_ALLOC: zpool.get("alloc", "未知"),
+                    ATTR_ZPOOL_FREE: zpool.get("free", "未知"),
+                    ATTR_ZPOOL_CAPACITY: zpool.get("capacity", "未知"),
+                    ATTR_ZPOOL_FRAGMENTATION: zpool.get("frag", "未知"),
+                    ATTR_ZPOOL_CKPOINT: zpool.get("ckpoint", "") if zpool.get("ckpoint") != "" else "无",
+                    ATTR_ZPOOL_EXPANDSZ: zpool.get("expand_sz", "") if zpool.get("expand_sz") != "" else "无",
+                    ATTR_ZPOOL_DEDUP: zpool.get("dedup", "未知"),
+                    "根路径": zpool.get("altroot", "") if zpool.get("altroot") != "" else "默认"
+                }
+        return {}
+
+class ZFSScrubSensor(CoordinatorEntity, SensorEntity):
+    """ZFS存储池scrub进度传感器"""
+    
+    def __init__(self, coordinator, zpool_name, name, unique_id):
+        super().__init__(coordinator)
+        self.zpool_name = zpool_name
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = "%"
+        self._attr_icon = "mdi:progress-check"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_ZFS)},
+            "name": "ZFS存储池",
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+        self._attr_device_class = SensorDeviceClass.POWER_FACTOR
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self.scrub_cache = {}
+    
+    @property
+    def native_value(self):
+        """返回scrub进度百分比"""
+        # 获取scrub状态信息
+        scrub_info = self.coordinator.data.get("scrub_status", {}).get(self.zpool_name, {})
+        progress_str = scrub_info.get("scrub_progress", "0%")
+        
+        try:
+            # 提取数字部分
+            if progress_str and progress_str != "0%":
+                return float(progress_str.replace("%", ""))
+            return 0.0
+        except (ValueError, AttributeError):
+            return 0.0
+    
+    @property
+    def extra_state_attributes(self):
+        """返回scrub详细状态信息"""
+        scrub_info = self.coordinator.data.get("scrub_status", {}).get(self.zpool_name, {})
+        
+        return {
+            ATTR_ZPOOL_NAME: self.zpool_name,
+            ATTR_ZPOOL_SCRUB_STATUS: scrub_info.get("scrub_status", "无检查"),
+            ATTR_ZPOOL_SCRUB_PROGRESS: scrub_info.get("scrub_progress", "0%"),
+            ATTR_ZPOOL_SCRUB_SCAN_RATE: scrub_info.get("scan_rate", "0/s"),
+            ATTR_ZPOOL_SCRUB_TIME_REMAINING: scrub_info.get("time_remaining", ""),
+            ATTR_ZPOOL_SCRUB_ISSUED: scrub_info.get("issued", "0"),
+            ATTR_ZPOOL_SCRUB_REPAIRED: scrub_info.get("repaired", "0"),
+            "开始时间": scrub_info.get("scrub_start_time", ""),
+            "扫描数据": scrub_info.get("scanned", "0"),
+            "检查进行中": scrub_info.get("scrub_in_progress", False)
+        }
+
+
+class CpuUsageSensor(CoordinatorEntity, SensorEntity):
+    """CPU使用率传感器"""
+
+    def __init__(self, coordinator, name, unique_id):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_icon = "mdi:chip"
+        self._attr_native_unit_of_measurement = "%"
+        self._attr_device_class = SensorDeviceClass.POWER_FACTOR
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+
+    @property
+    def native_value(self):
+        return self.coordinator.data.get("system", {}).get("cpu_usage_percent")
+
+
+class MemoryUsageSensor(CoordinatorEntity, SensorEntity):
+    """内存使用率传感器"""
+
+    def __init__(self, coordinator, name, unique_id):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_icon = "mdi:memory"
+        self._attr_native_unit_of_measurement = "%"
+        self._attr_device_class = SensorDeviceClass.POWER_FACTOR
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+
+    @property
+    def native_value(self):
+        system_data = self.coordinator.data.get("system", {})
+        mem_total = system_data.get("memory_total")
+        mem_used = system_data.get("memory_used")
+        if mem_total is None or mem_used is None or mem_total in ("未知", 0):
+            return None
+        try:
+            return round(float(mem_used) / float(mem_total) * 100, 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    @property
+    def extra_state_attributes(self):
+        system_data = self.coordinator.data.get("system", {})
+        total = system_data.get("memory_total")
+        used = system_data.get("memory_used")
+        available = system_data.get("memory_available")
+        try:
+            total_gb = round(float(total) / (1024**3), 2) if total and total != "未知" else None
+        except (TypeError, ValueError):
+            total_gb = None
+        try:
+            used_gb = round(float(used) / (1024**3), 2) if used and used != "未知" else None
+        except (TypeError, ValueError):
+            used_gb = None
+        try:
+            avail_gb = round(float(available) / (1024**3), 2) if available and available != "未知" else None
+        except (TypeError, ValueError):
+            avail_gb = None
+        return {
+            "总内存 (GB)": total_gb,
+            "已用内存 (GB)": used_gb,
+            "可用内存 (GB)": avail_gb,
+        }
+
+
+class NetworkSpeedSensor(CoordinatorEntity, SensorEntity):
+    """实时网络速度传感器"""
+
+    def __init__(self, coordinator, name, unique_id, interface, direction):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._interface = interface
+        self._direction = direction  # "rx" or "tx"
+        self._attr_icon = "mdi:arrow-down-bold" if direction == "rx" else "mdi:arrow-up-bold"
+        self._attr_device_class = SensorDeviceClass.DATA_RATE
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+
+    @property
+    def native_value(self):
+        net_speeds = self.coordinator.data.get("system", {}).get("network_speeds", {})
+        iface_speeds = net_speeds.get(self._interface, {})
+        speed = iface_speeds.get(f"{self._direction}_speed", 0)
+        if speed is None or speed == 0:
+            return 0
+        # 返回字节/秒
+        return round(speed, 1)
+
+    @property
+    def native_unit_of_measurement(self):
+        return "B/s"
+
+    @property
+    def extra_state_attributes(self):
+        net_speeds = self.coordinator.data.get("system", {}).get("network_speeds", {})
+        iface_speeds = net_speeds.get(self._interface, {})
+        speed = iface_speeds.get(f"{self._direction}_speed", 0) or 0
+        rx_bytes = iface_speeds.get("rx_bytes", 0)
+        tx_bytes = iface_speeds.get("tx_bytes", 0)
+        # 格式化显示
+        def fmt_speed(bps):
+            if bps >= 1_000_000:
+                return f"{bps/1_000_000:.2f} MB/s"
+            if bps >= 1_000:
+                return f"{bps/1_000:.1f} KB/s"
+            return f"{bps:.1f} B/s"
+        return {
+            "接口": self._interface,
+            "方向": "下载" if self._direction == "rx" else "上传",
+            "实时速度": fmt_speed(speed),
+            "总接收字节": rx_bytes,
+            "总发送字节": tx_bytes,
+        }
+
+
+class NetworkTraffic7dSensor(CoordinatorEntity, SensorEntity):
+    """近7日网络流量传感器"""
+
+    def __init__(self, coordinator, name, unique_id, interface, direction):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._interface = interface
+        self._direction = direction  # "rx" or "tx"
+        self._attr_icon = "mdi:download-network" if direction == "rx" else "mdi:upload-network"
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+
+    @property
+    def native_value(self):
+        traffic_7d = self.coordinator.data.get("system", {}).get("network_traffic_7d", {})
+        iface_data = traffic_7d.get(self._interface, {})
+        first_rx = iface_data.get("rx_bytes_7d", 0)
+        first_tx = iface_data.get("tx_bytes_7d", 0)
+        current_rx = iface_data.get("current_rx_bytes", 0)
+        current_tx = iface_data.get("current_tx_bytes", 0)
+
+        if self._direction == "rx":
+            delta = max(0, current_rx - first_rx)
+        else:
+            delta = max(0, current_tx - first_tx)
+
+        # 以字节为单位返回
+        return delta
+
+    @property
+    def native_unit_of_measurement(self):
+        return "B"
+
+    @property
+    def extra_state_attributes(self):
+        traffic_7d = self.coordinator.data.get("system", {}).get("network_traffic_7d", {})
+        iface_data = traffic_7d.get(self._interface, {})
+        first_seen = iface_data.get("first_seen", "未知")
+
+        def fmt_bytes(b):
+            if b >= 1024**4:
+                return f"{b/(1024**4):.2f} TB"
+            if b >= 1024**3:
+                return f"{b/(1024**3):.2f} GB"
+            if b >= 1024**2:
+                return f"{b/(1024**2):.2f} MB"
+            if b >= 1024:
+                return f"{b/1024:.1f} KB"
+            return f"{b} B"
+
+        first_rx = iface_data.get("rx_bytes_7d", 0)
+        first_tx = iface_data.get("tx_bytes_7d", 0)
+        current_rx = iface_data.get("current_rx_bytes", 0)
+        current_tx = iface_data.get("current_tx_bytes", 0)
+
+        return {
+            "接口": self._interface,
+            "方向": "下载" if self._direction == "rx" else "上传",
+            "统计起始时间": first_seen,
+            "起始累计值": fmt_bytes(first_rx if self._direction == "rx" else first_tx),
+            "当前累计值": fmt_bytes(current_rx if self._direction == "rx" else current_tx),
+            "7日总流量": fmt_bytes(self.native_value or 0),
+        }
