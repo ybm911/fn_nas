@@ -15,8 +15,8 @@ jobs:
 
       - name: Create zip
         run: |
-          cd custom_components
-          zip -r fn_nas.zip fn_nas/
+          cd custom_components/fn_nas
+          zip -r ../fn_nas.zip .
 
       - name: Upload to release
         env:
